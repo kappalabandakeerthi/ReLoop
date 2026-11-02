@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     assessment_id UUID NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
     device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    recommended_route VARCHAR(30) NOT NULL CHECK (recommended_route IN ('Repair', 'Resell', 'Donate', 'Refurbish', 'Recycle')),
+    recommended_route VARCHAR(30) NOT NULL CHECK (recommended_route IN ('Repair', 'Reuse', 'Resell', 'Donate', 'Refurbish', 'Recycle')),
     overall_score NUMERIC(5,2) NOT NULL,
     explanation TEXT NOT NULL,
     summary TEXT NOT NULL,
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
 CREATE TABLE IF NOT EXISTS recommendation_scores (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     recommendation_id UUID NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
-    route VARCHAR(30) NOT NULL CHECK (route IN ('Repair', 'Resell', 'Donate', 'Refurbish', 'Recycle')),
+    route VARCHAR(30) NOT NULL CHECK (route IN ('Repair', 'Reuse', 'Resell', 'Donate', 'Refurbish', 'Recycle')),
     is_eligible BOOLEAN NOT NULL,
     final_score NUMERIC(5,2) NOT NULL,
     financial_score NUMERIC(5,2) NOT NULL,
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS recovery_requests (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     assessment_id UUID NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
-    selected_route VARCHAR(30) NOT NULL CHECK (selected_route IN ('Repair', 'Resell', 'Donate', 'Refurbish', 'Recycle')),
+    selected_route VARCHAR(30) NOT NULL CHECK (selected_route IN ('Repair', 'Reuse', 'Resell', 'Donate', 'Refurbish', 'Recycle')),
     provider_id UUID REFERENCES service_providers(id) ON DELETE SET NULL,
     current_status VARCHAR(50) NOT NULL CHECK (current_status IN (
         'Request Created',

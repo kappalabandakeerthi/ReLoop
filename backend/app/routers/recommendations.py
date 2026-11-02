@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -8,6 +9,7 @@ from ..models.device import Device
 from ..models.assessment import Assessment
 from ..models.recommendation import Recommendation, RecommendationScore
 from ..schemas.recommendation import RecommendationResponse, RecommendationScoreResponse
+from ..engine.assessment_estimator import estimate_assessment_values
 from ..utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/recommendations", tags=["Recommendations"])
@@ -75,6 +77,42 @@ def _format_recommendation_response(rec: Recommendation, db: Session) -> Recomme
             "overall_condition": assessment.overall_condition,
             "functional_status": assessment.functional_status
         }
+        if device:
+            age_years = device.approximate_age_years
+            if age_years is None and device.purchase_year is not None:
+                age_years = max(0.0, float(datetime.now().year - device.purchase_year))
+            estimates = estimate_assessment_values(
+                category=device.category.name if device.category else "Other",
+                age_years=age_years,
+                overall_condition=assessment.overall_condition,
+                functional_status=assessment.functional_status,
+                specific_faults=assessment.get_faults_list(),
+                physically_damaged=device.physically_damaged,
+                brand=device.brand,
+                model=device.model,
+            )
+            estimate_sources = {}
+            for field, estimated in (
+                ("estimated_repair_cost", estimates.estimated_repair_cost),
+                ("estimated_resale_value", estimates.estimated_resale_value),
+                ("estimated_replacement_cost", estimates.estimated_replacement_cost),
+                ("expected_remaining_life_years", estimates.expected_remaining_life_years),
+            ):
+                stored_value = financial_summary[field]
+                estimate_sources[field] = (
+                    "ReLoop estimate"
+                    if stored_value is not None and abs(stored_value - estimated) < 0.01
+                    else "User-provided estimate"
+                )
+            financial_summary.update({
+                "estimate_method": "category_age_condition_v1",
+                "estimate_confidence": estimates.confidence,
+                "estimate_sources": estimate_sources,
+                "estimate_notes": estimates.notes,
+                "estimate_ranges": estimates.ranges(),
+                "matched_faults": estimates.matched_faults,
+                "is_market_quote": False,
+            })
 
     return RecommendationResponse(
         id=rec.id,

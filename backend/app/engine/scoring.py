@@ -15,16 +15,26 @@ Note: Does NOT utilize any environmental metrics or carbon calculations.
 
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
+from math import isfinite
 from .eligibility import DeviceAssessmentInput, RouteEligibilityResult
+from .assessment_estimator import (
+    CONDITION_MULTIPLIERS,
+    EXPECTED_SERVICE_LIFE,
+    estimate_assessment_values,
+)
+from ..config import settings
 
 @dataclass
 class ScoringWeights:
-    financial: float = 0.35
-    useful_life: float = 0.30
-    convenience: float = 0.15
-    reuse: float = 0.20
+    financial: float = settings.WEIGHT_FINANCIAL
+    useful_life: float = settings.WEIGHT_USEFUL_LIFE
+    convenience: float = settings.WEIGHT_CONVENIENCE
+    reuse: float = settings.WEIGHT_REUSE
 
     def validate(self) -> None:
+        values = (self.financial, self.useful_life, self.convenience, self.reuse)
+        if any(not isfinite(value) or value < 0 or value > 1 for value in values):
+            raise ValueError("Each scoring weight must be between 0 and 1.")
         total = self.financial + self.useful_life + self.convenience + self.reuse
         if not (0.99 <= total <= 1.01):
             raise ValueError(f"Weights must sum to 1.0 (current sum: {total:.4f})")
@@ -42,206 +52,203 @@ class RouteScoreDetail:
     ineligible_reason: Optional[str] = None
     breakdown: Dict[str, Any] = field(default_factory=dict)
 
-def _estimate_replacement_benchmark(category: str) -> float:
-    benchmarks = {
-        "laptop": 800.0,
-        "smartphone": 600.0,
-        "tablet": 450.0,
-        "monitor": 250.0,
-        "desktop": 900.0,
-        "printer": 200.0,
-        "charger": 35.0,
-        "other": 300.0,
-    }
-    return benchmarks.get(category.lower().strip(), 350.0)
+@dataclass(frozen=True)
+class _DeviceScoreContext:
+    category: str
+    replacement_cost: float
+    repair_cost: float
+    resale_value: float
+    remaining_life_years: float
+    service_life_years: float
+    age_years: float
+    condition_factor: float
+    functionality_factor: float
+    fault_count: int
+    matched_faults: List[str]
+    contains_personal_data: bool
+    physically_damaged: bool
+    powers_on: Optional[bool]
+
+
+def _score_context(device: DeviceAssessmentInput) -> _DeviceScoreContext:
+    estimates = estimate_assessment_values(
+        category=device.category,
+        brand=device.brand,
+        model=device.model,
+        age_years=device.age_years,
+        overall_condition=device.overall_condition,
+        functional_status=device.functional_status,
+        specific_faults=device.specific_faults,
+        physically_damaged=device.physically_damaged,
+    )
+    category = device.category.lower().strip()
+    service_life = EXPECTED_SERVICE_LIFE.get(category, EXPECTED_SERVICE_LIFE["other"])
+    condition = device.overall_condition.lower().strip()
+    condition_factor = min(1.0, CONDITION_MULTIPLIERS.get(condition, CONDITION_MULTIPLIERS["unknown"]))
+    functional = device.functional_status.lower().strip()
+    if functional == "fully_functional":
+        functionality_factor = 1.0
+    elif functional == "partially_functional":
+        functionality_factor = 0.65 if device.powers_on is True else 0.4
+    elif functional == "non_functional":
+        functionality_factor = 0.0
+    else:
+        functionality_factor = 0.35 if device.powers_on is True else 0.2
+
+    return _DeviceScoreContext(
+        category=category,
+        replacement_cost=device.estimated_replacement_cost if device.estimated_replacement_cost is not None else estimates.estimated_replacement_cost,
+        repair_cost=device.estimated_repair_cost if device.estimated_repair_cost is not None else estimates.estimated_repair_cost,
+        resale_value=device.estimated_resale_value if device.estimated_resale_value is not None else estimates.estimated_resale_value,
+        remaining_life_years=device.expected_remaining_life_years if device.expected_remaining_life_years is not None else estimates.expected_remaining_life_years,
+        service_life_years=service_life,
+        age_years=max(0.0, device.age_years if device.age_years is not None else service_life * 0.6),
+        condition_factor=condition_factor,
+        functionality_factor=functionality_factor,
+        fault_count=len(estimates.matched_faults),
+        matched_faults=estimates.matched_faults,
+        contains_personal_data=device.contains_personal_data,
+        physically_damaged=bool(device.physically_damaged),
+        powers_on=device.powers_on,
+    )
+
+
+def _bounded_score(value: float) -> float:
+    return round(min(100.0, max(0.0, value)), 1)
 
 def _calculate_financial_score(
     route: str,
     device: DeviceAssessmentInput,
-    notes: List[str]
+    notes: List[str],
+    context: Optional[_DeviceScoreContext] = None,
 ) -> float:
-    """
-    Computes normalized financial benefit score (0 - 100).
-    Never defaults missing data to zero; uses contextual imputation.
-    """
-    cat = device.category.lower().strip()
-    repl_cost = device.estimated_replacement_cost or _estimate_replacement_benchmark(cat)
-    age = device.age_years if device.age_years is not None else 3.0
-    cond = device.working_condition.lower().strip()
+    """Score monetary value relative to this device's model-adjusted replacement cost."""
+    context = context or _score_context(device)
+    replacement = max(context.replacement_cost, 1.0)
+    repair = max(0.0, context.repair_cost)
+    resale = max(0.0, context.resale_value)
+    repair_ratio = repair / replacement
+    resale_ratio = resale / replacement
 
-    if route == "Resell":
-        if device.estimated_resale_value is not None and device.estimated_resale_value > 0:
-            ratio = device.estimated_resale_value / repl_cost
-            score = min(100.0, max(25.0, ratio * 130.0))
-            notes.append(f"Resell financial score computed from user resale estimate (${device.estimated_resale_value:.2f})")
-            return round(score, 1)
-        else:
-            # Impute based on age and condition without inventing fake figures
-            base_ratio = max(0.15, 0.70 - (age * 0.08))
-            if cond == "minor_issues":
-                base_ratio *= 0.75
-            score = min(95.0, max(30.0, base_ratio * 120.0))
-            notes.append("Resell financial score derived from residual market depreciation model (no user estimate provided)")
-            return round(score, 1)
-
-    elif route == "Repair":
-        rep_cost = device.estimated_repair_cost
-        if rep_cost is not None and repl_cost > 0:
-            savings = repl_cost - rep_cost
-            savings_ratio = max(0.0, savings / repl_cost)
-            # High savings ratio (e.g. 90% savings) gives high financial score (85 - 95)
-            score = min(95.0, max(20.0, savings_ratio * 105.0))
-            notes.append(f"Repair financial score calculated from net replacement savings (${savings:.2f})")
-            return round(score, 1)
-        else:
-            # Default moderate-to-high financial viability if repairable faults present
-            score = 75.0 if cond in ["minor_issues", "working"] else 50.0
-            notes.append("Repair financial score estimated from typical component servicing savings")
-            return round(score, 1)
-
-    elif route == "Refurbish":
-        # Trade-in / refurbisher payout is typically 65-80% of private resale
-        if device.estimated_resale_value is not None:
-            est_trade_in = device.estimated_resale_value * 0.75
-            ratio = est_trade_in / repl_cost
-            score = min(85.0, max(30.0, ratio * 110.0))
-        else:
-            base_ratio = max(0.12, 0.55 - (age * 0.07))
-            score = min(85.0, max(28.0, base_ratio * 110.0))
-        notes.append("Refurbish financial score based on certified trade-in valuation")
-        return round(score, 1)
-
-    elif route == "Donate":
-        # Financial return is tax benefit or non-cash utility
-        notes.append("Donate financial score reflects standard charitable item tax deduction utility")
-        return 35.0
-
-    elif route == "Recycle":
-        # E-waste recycling typically has minimal or nominal material scrap payout
-        notes.append("Recycle financial score reflects standard commodity materials scrap value")
-        return 20.0
-
-    return 50.0
+    if route == "Repair":
+        savings = replacement - repair
+        notes.append(f"{route} avoids ${max(0.0, savings):.2f} of replacement cost after estimated service expense.")
+        return _bounded_score(savings / replacement * 100.0)
+    if route in {"Reuse", "Resell", "Donate"}:
+        value_score = resale_ratio * (context.condition_factor if route == "Reuse" else 1.0)
+        notes.append(
+            f"{route} retained-value score compares ${resale:.2f} estimated device value "
+            f"with ${replacement:.2f} model-specific replacement cost."
+        )
+        if route == "Donate":
+            notes.append("Donation value is non-cash value transferred to a recipient.")
+        return _bounded_score(value_score * 100.0)
+    if route == "Refurbish":
+        net_value = resale - repair
+        notes.append(f"Refurbishment net value uses ${resale:.2f} resale value less ${repair:.2f} estimated repair cost.")
+        return _bounded_score(net_value / replacement * 100.0)
+    if route == "Recycle":
+        recycling_fit = repair_ratio * max(0.0, 1.0 - resale_ratio)
+        notes.append(
+            f"Recycling financial fit reflects ${repair:.2f} estimated repair cost versus "
+            f"${replacement:.2f} replacement cost and ${resale:.2f} resale value; recycler payout is unknown."
+        )
+        return _bounded_score(recycling_fit * 100.0)
+    return 0.0
 
 def _calculate_useful_life_score(
     route: str,
     device: DeviceAssessmentInput,
-    notes: List[str]
+    notes: List[str],
+    context: Optional[_DeviceScoreContext] = None,
 ) -> float:
-    """
-    Computes useful life extension score (0 - 100).
-    Measures duration the device remains active in service.
-    """
-    age = device.age_years if device.age_years is not None else 3.0
-    exp_life = device.expected_remaining_life_years
+    """Normalize estimated useful service against the category's expected service life."""
+    context = context or _score_context(device)
+    if route == "Recycle":
+        notes.append("Recycling does not extend the device's active service life.")
+        return 0.0
 
-    if route == "Repair":
-        # Repairing directly adds 2 to 5 years of active operational life
-        years_added = exp_life if exp_life is not None else max(2.0, 5.0 - (age * 0.4))
-        score = min(98.0, max(50.0, years_added * 20.0 + 15.0))
-        notes.append(f"Repair extends operational lifecycle by estimated {years_added:.1f} years")
-        return round(score, 1)
-
-    elif route == "Refurbish":
-        # Professional overhaul extends useful life with tested parts
-        years_added = exp_life if exp_life is not None else max(2.5, 6.0 - (age * 0.35))
-        score = min(96.0, max(55.0, years_added * 18.0 + 20.0))
-        notes.append(f"Refurbishment restores factory specifications, adding ~{years_added:.1f} years")
-        return round(score, 1)
-
-    elif route == "Resell":
-        # Resale keeps existing working device active in secondary market
-        years = max(1.5, 5.0 - (age * 0.5))
-        score = min(90.0, max(45.0, years * 16.0 + 15.0))
-        notes.append(f"Resale channels working device to secondary owner (~{years:.1f} yrs active use)")
-        return round(score, 1)
-
-    elif route == "Donate":
-        # Donated devices provide 2 to 4 years of education / non-profit service
-        years = max(1.5, 4.0 - (age * 0.4))
-        score = min(85.0, max(40.0, years * 18.0 + 10.0))
-        notes.append(f"Donation keeps device in service with students/charities (~{years:.1f} yrs)")
-        return round(score, 1)
-
-    elif route == "Recycle":
-        # End of service life: device is disassembled for materials, zero operational life
-        notes.append("Recycle concludes active device lifecycle; materials recovered for new manufacturing")
-        return 18.0
-
-    return 50.0
+    remaining_life = context.remaining_life_years
+    if route in {"Reuse", "Resell", "Donate"}:
+        remaining_life *= context.functionality_factor
+    score = _bounded_score(remaining_life / max(context.service_life_years, 1.0) * 100.0)
+    notes.append(
+        f"{route} useful-life score uses {remaining_life:.1f} estimated active years "
+        f"against {context.service_life_years:.1f} expected years for this category."
+    )
+    return score
 
 def _calculate_convenience_score(
     route: str,
     device: DeviceAssessmentInput,
-    notes: List[str]
+    notes: List[str],
+    context: Optional[_DeviceScoreContext] = None,
 ) -> float:
-    """
-    Computes convenience and accessibility score (0 - 100).
-    Measures logistical simplicity, drop-off accessibility, and time commitment.
-    """
-    if route == "Recycle":
-        # Very high convenience: authorized drop-off kiosks, municipal centers, retailers
-        notes.append("Recycle offers highest convenience via standardized drop-off bins and collection points")
-        return 92.0
-
-    elif route == "Donate":
-        # High convenience: local non-profit drop boxes, scheduled community pickups
-        notes.append("Donate offers high convenience via local charity centers and scheduled pickups")
-        return 82.0
-
-    elif route == "Refurbish":
-        # Good convenience: prepaid mail-in kits or certified drop-off partner counters
-        notes.append("Refurbish offers moderate-to-high convenience via prepaid mail-in return kits")
-        return 74.0
-
-    elif route == "Repair":
-        # Moderate convenience: requires bringing to local repair shop or waiting for diagnostics
-        notes.append("Repair requires technician drop-off, diagnostic window, and pickup")
-        return 68.0
-
+    """Convert estimated handling effort into convenience; no provider-distance data is available."""
+    context = context or _score_context(device)
+    device_handling = {
+        "smartphone": 5, "tablet": 10, "laptop": 15, "charger": 3,
+        "monitor": 30, "desktop": 35, "printer": 30, "other": 20,
+    }.get(context.category, 20)
+    fault_handling = context.fault_count * (8 if route in {"Repair", "Refurbish"} else 4)
+    handoff = route != "Reuse"
+    effort_minutes = 0 if not handoff else device_handling + fault_handling
+    if route in {"Repair", "Refurbish"}:
+        effort_minutes += 12 + min(35, max(0.0, context.repair_cost / max(context.replacement_cost, 1.0)) * 35)
     elif route == "Resell":
-        # Lower convenience: requires photography, listing description, answering buyers, packaging/shipping
-        notes.append("Resell requires listing creation, customer communication, and shipping/exchange logistics")
-        return 50.0
+        effort_minutes += 28 + (1.0 - context.functionality_factor) * 24
+    elif route == "Donate":
+        effort_minutes += 12 + (1.0 - context.functionality_factor) * 18
+    elif route == "Recycle":
+        effort_minutes += 8 + context.fault_count * 3
+    if handoff and context.contains_personal_data:
+        effort_minutes += 18
+    if handoff and context.physically_damaged:
+        effort_minutes += 12
+    if handoff and context.powers_on is False:
+        effort_minutes += 8
+    effort_minutes += max(0.0, context.age_years - context.service_life_years) * 2
 
-    return 60.0
+    score = _bounded_score(100.0 / (1.0 + effort_minutes / 60.0))
+    notes.append(
+        f"Convenience estimates {effort_minutes:.0f} handling minutes for {route}, "
+        "including device size, hand-off, fault checks, privacy, and damage factors."
+    )
+    notes.append("Provider distance and local travel time are not included.")
+    return score
 
 def _calculate_reuse_potential_score(
     route: str,
     device: DeviceAssessmentInput,
-    notes: List[str]
+    notes: List[str],
+    context: Optional[_DeviceScoreContext] = None,
 ) -> float:
-    """
-    Computes circular product utility score (0 - 100).
-    Measures product preservation vs destructive material recovery.
-    Note: Does NOT calculate environmental carbon emissions or eco metrics.
-    """
-    if route == "Donate":
-        # 100% direct product reuse for public good
-        notes.append("Donate delivers 100% direct product reuse to community beneficiaries")
-        return 95.0
+    """Score the chance of keeping this particular device in useful service."""
+    context = context or _score_context(device)
+    if route == "Recycle":
+        notes.append("Recycling does not keep the whole device in service; no environmental score is included.")
+        return 0.0
 
-    elif route == "Resell":
-        # High direct product reuse in secondary market
-        notes.append("Resell achieves complete unit reuse with an active secondary user")
-        return 90.0
+    life_factor = min(1.0, context.remaining_life_years / max(context.service_life_years, 1.0))
+    if route in {"Reuse", "Resell", "Donate"}:
+        score = 100.0 * life_factor * context.condition_factor * context.functionality_factor
+        notes.append(
+            f"{route} reuse potential uses {context.matched_faults or ['no reported faults']}, "
+            f"condition, functionality, and {context.remaining_life_years:.1f} remaining years."
+        )
+        return _bounded_score(score)
 
-    elif route == "Refurbish":
-        # High product reuse after technical restoration
-        notes.append("Refurbish preserves majority of chassis, display, and motherboard components")
-        return 82.0
+    if route == "Repair":
+        retained_value_factor = max(0.0, (context.replacement_cost - context.repair_cost) / max(context.replacement_cost, 1.0))
+        notes.append("Repair reuse potential combines remaining service life with value retained after repair cost.")
+        return _bounded_score(100.0 * life_factor * retained_value_factor)
 
-    elif route == "Repair":
-        # Retains the device with original owner, replacing only worn subcomponents
-        notes.append("Repair preserves device assembly by replacing only defective subcomponents")
-        return 78.0
+    if route == "Refurbish":
+        recovery_value_factor = min(1.0, context.resale_value / max(context.replacement_cost, 1.0))
+        notes.append("Refurbish reuse potential uses the device's estimated post-service resale value and remaining life.")
+        return _bounded_score(100.0 * life_factor * recovery_value_factor)
 
-    elif route == "Recycle":
-        # Shredding/melting components: low product reuse (only raw feedstock recovery)
-        notes.append("Recycle recovers raw metals and plastics but terminates whole-device reuse")
-        return 25.0
-
-    return 50.0
+    return 0.0
 
 def score_eligible_routes(
     device: DeviceAssessmentInput,
@@ -255,6 +262,7 @@ def score_eligible_routes(
     if weights is None:
         weights = ScoringWeights()
     weights.validate()
+    context = _score_context(device)
 
     scored_routes: Dict[str, RouteScoreDetail] = {}
 
@@ -278,10 +286,10 @@ def score_eligible_routes(
             continue
 
         notes: List[str] = []
-        fin = _calculate_financial_score(route, device, notes)
-        life = _calculate_useful_life_score(route, device, notes)
-        conv = _calculate_convenience_score(route, device, notes)
-        reuse = _calculate_reuse_potential_score(route, device, notes)
+        fin = _calculate_financial_score(route, device, notes, context)
+        life = _calculate_useful_life_score(route, device, notes, context)
+        conv = _calculate_convenience_score(route, device, notes, context)
+        reuse = _calculate_reuse_potential_score(route, device, notes, context)
 
         # Weighted calculation
         final = (

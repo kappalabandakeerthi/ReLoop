@@ -6,6 +6,7 @@ decision engine pipeline, provider directory, and recovery tracking.
 
 import pytest
 import httpx
+import uuid
 from app.main import app
 
 @pytest.mark.anyio
@@ -18,15 +19,24 @@ async def test_health_check():
 @pytest.mark.anyio
 async def test_auth_workflow():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        test_email = "tester_unique_flow@reloop.dev"
-        # 1. Register or check existing
+        test_email = f"tester-{uuid.uuid4().hex}@reloop.test"
+        reg_res = await client.post("/api/auth/register", json={
+            "email": test_email,
+            "password": "Password123!",
+            "full_name": "Test User",
+            "city": "Austin",
+            "role": "admin"
+        })
+        assert reg_res.status_code == 422
+
         reg_res = await client.post("/api/auth/register", json={
             "email": test_email,
             "password": "Password123!",
             "full_name": "Test User",
             "city": "Austin"
         })
-        assert reg_res.status_code in [201, 400]
+        assert reg_res.status_code == 201
+        assert reg_res.json()["role"] == "user"
 
         # 2. Login
         login_res = await client.post("/api/auth/login", json={
@@ -42,17 +52,33 @@ async def test_auth_workflow():
         me_res = await client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
         assert me_res.status_code == 200
         assert me_res.json()["email"] == test_email
+        admin_res = await client.get("/api/admin/stats", headers={"Authorization": f"Bearer {token}"})
+        assert admin_res.status_code == 403
+
+@pytest.mark.anyio
+async def test_oauth_form_authenticates_bootstrapped_admin():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        token_res = await client.post("/api/auth/token", data={
+            "username": "admin@test.reloop",
+            "password": "test-only-admin-password"
+        })
+        assert token_res.status_code == 200
+        token = token_res.json()["access_token"]
+        stats_res = await client.get("/api/admin/stats", headers={"Authorization": f"Bearer {token}"})
+        assert stats_res.status_code == 200
 
 @pytest.mark.anyio
 async def test_full_device_recovery_workflow():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        # Login as demo user
-        login_res = await client.post("/api/auth/login", json={
-            "email": "user@reloop.dev",
-            "password": "User@123456"
+        test_email = f"journey-{uuid.uuid4().hex}@reloop.test"
+        register_res = await client.post("/api/auth/register", json={
+            "email": test_email,
+            "password": "JourneyPassword123!",
+            "full_name": "Journey User",
+            "city": "Austin"
         })
-        assert login_res.status_code == 200
-        token = login_res.json()["access_token"]
+        assert register_res.status_code == 201
+        token = register_res.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 
         # 1. Fetch categories
@@ -84,18 +110,53 @@ async def test_full_device_recovery_workflow():
             "device_id": device_id,
             "overall_condition": "good",
             "functional_status": "partially_functional",
-            "specific_faults": ["battery_drain", "internal_wear"],
-            "estimated_repair_cost": 80.0,
-            "estimated_resale_value": 450.0,
-            "estimated_replacement_cost": 950.0,
-            "expected_remaining_life_years": 3.5,
+            "specific_faults": ["battery_drain"],
             "notes": "Cosmetically clean, needs new OEM battery"
         })
         assert assess_res.status_code == 201
         rec = assess_res.json()
         assert rec["recommended_route"] == "Repair"
-        assert rec["overall_score"] > 65.0
+        repair_score = next(score for score in rec["scores"] if score["route"] == "Repair")
+        weights = rec["weights_used"]
+        weighted_total = sum(
+            weights[key] * repair_score[field]
+            for key, field in (
+                ("financial", "financial_score"),
+                ("useful_life", "useful_life_score"),
+                ("convenience", "convenience_score"),
+                ("reuse", "reuse_score"),
+            )
+        )
+        assert rec["overall_score"] == pytest.approx(weighted_total, abs=0.01)
+        estimates = rec["financial_summary"]
+        assert estimates["estimated_repair_cost"] > 0
+        assert estimates["estimated_resale_value"] > 0
+        assert estimates["estimated_replacement_cost"] > 0
+        assert estimates["expected_remaining_life_years"] > 0
+        assert estimates["estimate_method"] == "category_age_condition_v1"
+        assert set(estimates["estimate_sources"].values()) == {"ReLoop estimate"}
+        assert estimates["matched_faults"] == ["battery"]
+        assert estimates["estimate_ranges"]["estimated_repair_cost"]["high"] > estimates["estimate_ranges"]["estimated_repair_cost"]["low"]
+        for field in [
+            "estimated_repair_cost",
+            "estimated_replacement_cost",
+            "estimated_resale_value",
+            "expected_remaining_life_years",
+        ]:
+            assert estimates["estimate_ranges"][field]["low"] <= estimates[field]
+            assert estimates[field] <= estimates["estimate_ranges"][field]["high"]
         assessment_id = rec["assessment_id"]
+        saved_assessments_res = await client.get("/api/assessments/my", headers=headers)
+        assert saved_assessments_res.status_code == 200
+        saved_assessment = next(item for item in saved_assessments_res.json() if item["id"] == assessment_id)
+        assert saved_assessment["estimated_repair_cost"] == estimates["estimated_repair_cost"]
+        assert saved_assessment["estimated_replacement_cost"] == estimates["estimated_replacement_cost"]
+        saved_recommendation_res = await client.get(f"/api/recommendations/device/{device_id}", headers=headers)
+        assert saved_recommendation_res.status_code == 200
+        saved_estimates = saved_recommendation_res.json()["financial_summary"]
+        assert saved_estimates["estimate_method"] == "category_age_condition_v1"
+        assert saved_estimates["estimate_confidence"] == estimates["estimate_confidence"]
+        assert saved_estimates["estimate_ranges"] == estimates["estimate_ranges"]
 
         # 4. Discover Providers for Repair
         prov_res = await client.get("/api/providers?category=Repair")
@@ -103,6 +164,14 @@ async def test_full_device_recovery_workflow():
         providers = prov_res.json()
         assert len(providers) >= 1
         selected_provider = providers[0]
+
+        mismatched_provider_res = await client.post("/api/recovery", headers=headers, json={
+            "device_id": device_id,
+            "assessment_id": assessment_id,
+            "selected_route": "Resell",
+            "provider_id": selected_provider["id"]
+        })
+        assert mismatched_provider_res.status_code == 400
 
         # 5. Initiate Recovery Request
         recov_res = await client.post("/api/recovery", headers=headers, json={
@@ -118,8 +187,11 @@ async def test_full_device_recovery_workflow():
         assert recovery_data["tracking_code"].startswith("REL-")
         tracking_code = recovery_data["tracking_code"]
 
-        # 6. Track by Tracking Code
-        track_res = await client.get(f"/api/recovery/track/{tracking_code}")
+        # 6. Tracking details require authentication and ownership
+        anonymous_track_res = await client.get(f"/api/recovery/track/{tracking_code}")
+        assert anonymous_track_res.status_code == 401
+
+        track_res = await client.get(f"/api/recovery/track/{tracking_code}", headers=headers)
         assert track_res.status_code == 200
         assert track_res.json()["tracking_code"] == tracking_code
         assert len(track_res.json()["status_history"]) >= 1

@@ -15,9 +15,13 @@ from ..utils.dependencies import get_current_user, get_current_admin
 router = APIRouter(prefix="/providers", tags=["Service Providers"])
 
 def _format_provider(p: ServiceProvider) -> ProviderResponse:
-    res = ProviderResponse.from_orm(p)
-    res.services_offered = p.get_services()
-    return res
+    provider_data = {
+        field: getattr(p, field)
+        for field in ProviderResponse.model_fields
+        if field != "services_offered"
+    }
+    provider_data["services_offered"] = p.get_services()
+    return ProviderResponse.model_validate(provider_data)
 
 @router.get("", response_model=List[ProviderResponse])
 def get_providers(

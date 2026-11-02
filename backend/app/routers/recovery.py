@@ -8,6 +8,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.device import Device
 from ..models.assessment import Assessment
+from ..models.recommendation import Recommendation, RecommendationScore
 from ..models.provider import ServiceProvider
 from ..models.recovery import RecoveryRequest, RecoveryStatusHistory
 from ..schemas.recovery import (
@@ -21,7 +22,7 @@ from ..utils.dependencies import get_current_user, get_current_admin
 router = APIRouter(prefix="/recovery", tags=["Recovery Tracking"])
 
 def _generate_tracking_code() -> str:
-    random_part = secrets.token_hex(3).upper()
+    random_part = secrets.token_urlsafe(18).upper()
     return f"REL-{random_part}"
 
 def _format_recovery_response(req: RecoveryRequest) -> RecoveryResponse:
@@ -74,8 +75,23 @@ def initiate_recovery_request(
 
     # Validate assessment
     assessment = db.query(Assessment).filter(Assessment.id == request_data.assessment_id).first()
-    if not assessment:
+    if not assessment or assessment.device_id != device.id or assessment.user_id != device.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found.")
+
+    recommendation = db.query(Recommendation).filter(
+        Recommendation.assessment_id == assessment.id,
+        Recommendation.device_id == device.id
+    ).first()
+    eligible_route = db.query(RecommendationScore).filter(
+        RecommendationScore.recommendation_id == recommendation.id,
+        RecommendationScore.route == request_data.selected_route,
+        RecommendationScore.is_eligible.is_(True)
+    ).first() if recommendation else None
+    if not eligible_route:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The selected route is not eligible for this assessment."
+        )
 
     # Validate provider if provided
     initial_status = "Request Created"
@@ -83,6 +99,11 @@ def initiate_recovery_request(
         provider = db.query(ServiceProvider).filter(ServiceProvider.id == request_data.provider_id).first()
         if not provider:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Selected service provider not found.")
+        if provider.category != request_data.selected_route:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The selected provider does not offer the chosen recovery route."
+            )
         initial_status = "Provider Selected"
 
     tracking_code = _generate_tracking_code()
@@ -91,7 +112,7 @@ def initiate_recovery_request(
         tracking_code = _generate_tracking_code()
 
     new_request = RecoveryRequest(
-        user_id=current_user.id,
+        user_id=device.user_id,
         device_id=device.id,
         assessment_id=assessment.id,
         selected_route=request_data.selected_route,
@@ -101,8 +122,7 @@ def initiate_recovery_request(
         notes=request_data.notes
     )
     db.add(new_request)
-    db.commit()
-    db.refresh(new_request)
+    db.flush()
 
     # Record initial status in history
     history_entry = RecoveryStatusHistory(
@@ -126,10 +146,16 @@ def get_my_recovery_requests(
     return [_format_recovery_response(r) for r in requests]
 
 @router.get("/track/{tracking_code}", response_model=RecoveryResponse)
-def track_by_code(tracking_code: str, db: Session = Depends(get_db)):
+def track_by_code(
+    tracking_code: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     req = db.query(RecoveryRequest).filter(RecoveryRequest.tracking_code == tracking_code.upper().strip()).first()
     if not req:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No recovery request found with this tracking code.")
+    if req.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
     return _format_recovery_response(req)
 
 @router.get("/{recovery_id}", response_model=RecoveryResponse)
@@ -155,6 +181,20 @@ def update_recovery_status(
     req = db.query(RecoveryRequest).filter(RecoveryRequest.id == recovery_id).first()
     if not req:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recovery request not found.")
+
+    status_order = [
+        "Request Created",
+        "Provider Selected",
+        "Device Submitted / Collected",
+        "Device Under Assessment",
+        "Recovery in Progress",
+        "Completed",
+    ]
+    if status_order.index(status_update.status) <= status_order.index(req.current_status):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Recovery status can only advance to a later stage."
+        )
 
     req.current_status = status_update.status
     req.updated_at = datetime.utcnow()

@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from ..database import get_db
 from ..models.user import User
 from ..schemas.auth import (
@@ -21,28 +23,33 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def register(user_data: UserRegisterRequest, db: Session = Depends(get_db)):
     # Check if user already exists
-    existing_user = db.query(User).filter(User.email == user_data.email.lower()).first()
+    normalized_email = user_data.email.strip().lower()
+    existing_user = db.query(User).filter(User.email == normalized_email).first()
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A user with this email address already exists."
         )
 
-    # Restrict admin registration unless specifically designated or first user
-    user_role = "admin" if user_data.role == "admin" else "user"
-
     new_user = User(
-        email=user_data.email.lower(),
+        email=normalized_email,
         hashed_password=get_password_hash(user_data.password),
         full_name=user_data.full_name,
         phone=user_data.phone,
         address=user_data.address,
         city=user_data.city,
         postal_code=user_data.postal_code,
-        role=user_role
+        role="user"
     )
     db.add(new_user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A user with this email address already exists."
+        )
     db.refresh(new_user)
 
     token = create_access_token({"sub": new_user.id, "email": new_user.email, "role": new_user.role})
@@ -56,8 +63,18 @@ def register(user_data: UserRegisterRequest, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(login_data: UserLoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == login_data.email.lower()).first()
-    if not user or not verify_password(login_data.password, user.hashed_password):
+    return _authenticate(login_data.email, login_data.password, db)
+
+@router.post("/token", response_model=TokenResponse)
+def issue_oauth_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    return _authenticate(form_data.username, form_data.password, db)
+
+def _authenticate(email: str, password: str, db: Session) -> TokenResponse:
+    user = db.query(User).filter(User.email == email.strip().lower()).first()
+    if not user or not verify_password(password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password."

@@ -11,7 +11,7 @@ reasons. Option ranking and weighted scoring are handled in stage B (scoring.py)
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 
-ROUTES = ["Repair", "Resell", "Donate", "Refurbish", "Recycle"]
+ROUTES = ["Repair", "Reuse", "Resell", "Donate", "Refurbish", "Recycle"]
 
 @dataclass
 class DeviceAssessmentInput:
@@ -119,8 +119,35 @@ def evaluate_recovery_eligibility(device: DeviceAssessmentInput) -> StageAOutput
             reason="Identified faults or component wear appear serviceable by a qualified technician."
         )
 
+
+    # 2. REUSE ELIGIBILITY (continue using the device as-is)
+    if has_catastrophic_damage or device.powers_on is False or func_lower == "non_functional" or cond_lower == "not_working":
+        results["Reuse"] = RouteEligibilityResult(
+            route="Reuse",
+            is_eligible=False,
+            reason="The device is not currently safe or functional enough for continued use."
+        )
+    elif is_unknown_condition or (device.powers_on is None and func_lower != "fully_functional"):
+        results["Reuse"] = RouteEligibilityResult(
+            route="Reuse",
+            is_eligible=False,
+            reason="Confirm that the device powers on and functions reliably before continuing to use it.",
+            requires_assessment=True
+        )
+    elif func_lower == "fully_functional" and cond_lower == "working":
+        results["Reuse"] = RouteEligibilityResult(
+            route="Reuse",
+            is_eligible=True,
+            reason="The device is working and can remain in service without repair or transfer to another owner."
+        )
+    else:
+        results["Reuse"] = RouteEligibilityResult(
+            route="Reuse",
+            is_eligible=False,
+            reason="Continued use without repair is not recommended while functional issues remain."
+        )
     # -------------------------------------------------------------
-    # 2. RESELL ELIGIBILITY
+    # 3. RESELL ELIGIBILITY
     # -------------------------------------------------------------
     age = device.age_years if device.age_years is not None else 0
     max_resale_age = 7 if cat_lower in ["smartphone", "tablet"] else (10 if cat_lower in ["laptop", "desktop", "monitor"] else 5)
@@ -163,7 +190,7 @@ def evaluate_recovery_eligibility(device: DeviceAssessmentInput) -> StageAOutput
         )
 
     # -------------------------------------------------------------
-    # 3. DONATE ELIGIBILITY
+    # 4. DONATE ELIGIBILITY
     # -------------------------------------------------------------
     max_donation_age = 8 if cat_lower in ["smartphone", "tablet"] else 10
     
@@ -205,7 +232,7 @@ def evaluate_recovery_eligibility(device: DeviceAssessmentInput) -> StageAOutput
         )
 
     # -------------------------------------------------------------
-    # 4. REFURBISH ELIGIBILITY
+    # 5. REFURBISH ELIGIBILITY
     # -------------------------------------------------------------
     if cat_lower == "charger":
         results["Refurbish"] = RouteEligibilityResult(
@@ -246,7 +273,7 @@ def evaluate_recovery_eligibility(device: DeviceAssessmentInput) -> StageAOutput
         )
 
     # -------------------------------------------------------------
-    # 5. RECYCLE ELIGIBILITY (Authorized E-Waste Recyclers)
+    # 6. RECYCLE ELIGIBILITY (Authorized E-Waste Recyclers)
     # -------------------------------------------------------------
     # Authorized e-waste recycling is ALWAYS feasible for all electronics
     results["Recycle"] = RouteEligibilityResult(

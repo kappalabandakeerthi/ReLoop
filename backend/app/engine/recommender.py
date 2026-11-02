@@ -92,6 +92,12 @@ def run_reloop_recommendation_pipeline(
                 f"Repairing yields substantial cost savings over replacement while extending operational utility by years. "
                 f"Alternative routes like Resell or Donate scored lower because resolving the issue first delivers greater user value."
             )
+        elif top_route == "Reuse":
+            summary = f"Reuse is the recommended route (Score: {top_score:.1f}/100); your device is ready to stay in service."
+            explanation = (
+                f"Your {device.brand} {device.model or device.category} is reported as fully functional and in working condition. "
+                f"Continuing to use it avoids unnecessary repair or replacement while preserving its remaining useful life."
+            )
         elif top_route == "Resell":
             summary = f"Resell is the optimal recovery route (Score: {top_score:.1f}/100), maximizing direct monetary recovery."
             explanation = (

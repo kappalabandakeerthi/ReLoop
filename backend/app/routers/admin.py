@@ -66,7 +66,7 @@ def get_admin_dashboard_stats(
         func.count(Recommendation.id)
     ).group_by(Recommendation.recommended_route).all()
 
-    all_routes = ["Repair", "Resell", "Donate", "Refurbish", "Recycle"]
+    all_routes = ["Repair", "Reuse", "Resell", "Donate", "Refurbish", "Recycle"]
     routes_dict = {r: 0 for r in all_routes}
     for r, count in routes_raw:
         if r in routes_dict:

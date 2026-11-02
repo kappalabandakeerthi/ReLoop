@@ -28,7 +28,7 @@ def get_my_devices(
     devices = db.query(Device).filter(Device.user_id == current_user.id).order_by(Device.created_at.desc()).all()
     results = []
     for d in devices:
-        res = DeviceResponse.from_orm(d)
+        res = DeviceResponse.model_validate(d)
         if d.category:
             res.category_name = d.category.name
         results.append(res)
@@ -71,7 +71,7 @@ def create_device(
     db.commit()
     db.refresh(new_device)
 
-    res = DeviceResponse.from_orm(new_device)
+    res = DeviceResponse.model_validate(new_device)
     res.category_name = category.name
     return res
 
@@ -87,7 +87,7 @@ def get_device_details(
     if device.user_id != current_user.id and current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
 
-    res = DeviceResponse.from_orm(device)
+    res = DeviceResponse.model_validate(device)
     if device.category:
         res.category_name = device.category.name
     return res
@@ -135,7 +135,7 @@ def update_device(
     db.commit()
     db.refresh(device)
 
-    res = DeviceResponse.from_orm(device)
+    res = DeviceResponse.model_validate(device)
     if device.category:
         res.category_name = device.category.name
     return res

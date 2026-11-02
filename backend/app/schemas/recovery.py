@@ -1,17 +1,17 @@
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 class RecoveryRequestCreate(BaseModel):
     device_id: str
     assessment_id: str
-    selected_route: str = Field(..., pattern="^(Repair|Resell|Donate|Refurbish|Recycle)$")
+    selected_route: str = Field(..., pattern="^(Repair|Reuse|Resell|Donate|Refurbish|Recycle)$")
     provider_id: Optional[str] = None
-    notes: Optional[str] = None
+    notes: Optional[str] = Field(None, max_length=2000)
 
 class RecoveryStatusUpdate(BaseModel):
     status: str = Field(..., pattern="^(Request Created|Provider Selected|Device Submitted / Collected|Device Under Assessment|Recovery in Progress|Completed)$")
-    notes: Optional[str] = None
+    notes: Optional[str] = Field(None, max_length=2000)
 
 class StatusHistoryResponse(BaseModel):
     id: str
@@ -22,8 +22,7 @@ class StatusHistoryResponse(BaseModel):
     updated_by_name: Optional[str] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class RecoveryResponse(BaseModel):
     id: str
@@ -43,5 +42,4 @@ class RecoveryResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

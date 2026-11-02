@@ -13,6 +13,8 @@ Validates all mandatory scenarios and engine guarantees:
 import pytest
 from app.engine.eligibility import (
     DeviceAssessmentInput,
+    RouteEligibilityResult,
+    ROUTES,
     evaluate_recovery_eligibility
 )
 from app.engine.scoring import (
@@ -22,6 +24,7 @@ from app.engine.scoring import (
 from app.engine.recommender import (
     run_reloop_recommendation_pipeline
 )
+from app.engine.assessment_estimator import estimate_assessment_values
 
 # -------------------------------------------------------------
 # Scenario A: Functional laptop with battery issue
@@ -81,10 +84,11 @@ def test_scenario_b_functional_smartphone_resell_or_donate():
     assert "Donate" in stage_a.eligible_routes
 
     result = run_reloop_recommendation_pipeline(phone_input)
-    assert result.recommended_route in ["Resell", "Donate"]
+    assert result.recommended_route in ["Reuse", "Resell", "Donate"]
     assert result.overall_score >= 70.0
-    # Resell should have high financial return
-    assert result.all_scores["Resell"].financial_score >= 60.0
+    assert "Reuse" in stage_a.eligible_routes
+    # Financial score is the actual resale-to-replacement ratio.
+    assert result.all_scores["Resell"].financial_score == pytest.approx(47.5)
 
 # -------------------------------------------------------------
 # Scenario C: Severely damaged monitor
@@ -199,7 +203,230 @@ def test_missing_data_does_not_zero_scores():
     )
 
     result = run_reloop_recommendation_pipeline(device)
-    assert result.recommended_route in ["Resell", "Donate"]
+    assert result.recommended_route in ["Reuse", "Resell", "Donate"]
     # Check that financial score is NOT arbitrarily 0.0
     resell_fin = result.all_scores["Resell"].financial_score
     assert resell_fin > 25.0, f"Expected non-zero imputed financial score, got {resell_fin}"
+
+def test_reuse_route_ranks_fully_functional_device():
+    device = DeviceAssessmentInput(
+        category="Laptop",
+        age_years=2.0,
+        working_condition="working",
+        functional_status="fully_functional",
+        overall_condition="good",
+        powers_on=True,
+    )
+
+    result = run_reloop_recommendation_pipeline(device)
+
+    assert result.recommended_route == "Reuse"
+    assert "continuing to use" in result.explanation.lower()
+    assert result.all_scores["Reuse"].breakdown["weights"] == result.weights_used
+
+def test_assessment_estimator_uses_category_age_and_condition():
+    estimate = estimate_assessment_values(
+        category="Laptop",
+        age_years=3.0,
+        overall_condition="good",
+        functional_status="partially_functional",
+        specific_faults=["battery_drain"],
+    )
+
+    assert estimate.estimated_replacement_cost == 800.0
+    assert estimate.estimated_repair_cost > 0
+    assert estimate.estimated_resale_value > 0
+    assert estimate.expected_remaining_life_years > 0
+    assert estimate.confidence == "moderate"
+    assert "not market quotations" in " ".join(estimate.notes).lower()
+
+def test_fault_specific_costs_differ_for_battery_screen_board_and_port():
+    faults = {
+        "battery": "Battery failure",
+        "screen": "Cracked OLED display",
+        "motherboard": "Motherboard failure",
+        "charging_port": "Charging port failure",
+    }
+    estimates = {
+        fault_type: estimate_assessment_values(
+            category="Smartphone",
+            brand="Apple",
+            model="iPhone 14 OLED",
+            age_years=2,
+            overall_condition="good",
+            functional_status="partially_functional",
+            specific_faults=[description],
+        )
+        for fault_type, description in faults.items()
+    }
+
+    midpoints = {fault_type: estimate.estimated_repair_cost for fault_type, estimate in estimates.items()}
+    assert len(set(midpoints.values())) == 4
+    assert midpoints["motherboard"] > midpoints["screen"] > midpoints["battery"] > midpoints["charging_port"]
+    assert estimates["battery"].matched_faults == ["battery"]
+    assert estimates["screen"].repair_cost_range[1] > estimates["screen"].repair_cost_range[0]
+    assert estimates["motherboard"].estimated_repair_cost > estimates["motherboard"].estimated_replacement_cost * 0.5
+
+def test_screen_estimate_uses_display_type_and_exact_model_tier():
+    oled = estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14 OLED", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["cracked screen"],
+    )
+    lcd = estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14 LCD", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["cracked screen"],
+    )
+    premium_board = estimate_assessment_values(
+        category="Laptop", brand="Lenovo", model="ThinkPad X1 Pro", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["motherboard failure"],
+    )
+    standard_board = estimate_assessment_values(
+        category="Laptop", brand="Lenovo", model="IdeaPad 3", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["motherboard failure"],
+    )
+
+    assert oled.estimated_repair_cost > lcd.estimated_repair_cost
+    assert premium_board.estimated_repair_cost > standard_board.estimated_repair_cost
+
+def test_multiple_faults_combine_without_duplicate_charges():
+    single_battery = estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14", age_years=3,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["battery failure"],
+    )
+    repeated_battery = estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14", age_years=3,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["battery failure", "battery not holding charge"],
+    )
+    battery_and_port = estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14", age_years=3,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["battery failure", "charging port failure"],
+    )
+
+    assert repeated_battery.repair_cost_range == single_battery.repair_cost_range
+    assert repeated_battery.matched_faults == ["battery"]
+    assert battery_and_port.estimated_repair_cost > single_battery.estimated_repair_cost
+    assert battery_and_port.repair_cost_range[1] < single_battery.repair_cost_range[1] + estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14", age_years=3,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["charging port failure"],
+    ).repair_cost_range[1]
+
+def test_age_condition_function_and_unknown_fault_change_estimate_and_confidence():
+    functional_battery = estimate_assessment_values(
+        category="Smartphone", brand="Acme", model="Phone 12", age_years=2,
+        overall_condition="good", functional_status="fully_functional",
+        specific_faults=["battery failure"],
+    )
+    nonfunctional_battery = estimate_assessment_values(
+        category="Smartphone", brand="Acme", model="Phone 12", age_years=2,
+        overall_condition="good", functional_status="non_functional",
+        specific_faults=["battery failure"],
+    )
+    healthy_battery = estimate_assessment_values(
+        category="Smartphone", brand="Acme", model="Phone 12", age_years=1,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["battery failure"],
+    )
+    old_damaged_battery = estimate_assessment_values(
+        category="Smartphone", brand="Acme", model="Phone 12", age_years=4,
+        overall_condition="poor", functional_status="non_functional",
+        specific_faults=["battery failure"], physically_damaged=True,
+    )
+    unknown_fault = estimate_assessment_values(
+        category="Smartphone", brand="Acme", model="Phone 12", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["intermittent mystery fault"],
+    )
+
+    assert nonfunctional_battery.estimated_repair_cost > functional_battery.estimated_repair_cost
+    assert old_damaged_battery.estimated_repair_cost > healthy_battery.estimated_repair_cost
+    assert old_damaged_battery.estimated_resale_value < healthy_battery.estimated_resale_value
+    assert old_damaged_battery.expected_remaining_life_years < healthy_battery.expected_remaining_life_years
+    assert unknown_fault.confidence == "low"
+    assert "unknown" in unknown_fault.matched_faults
+
+def test_required_fault_types_have_distinct_repair_ranges():
+    fault_descriptions = {
+        "battery": "Battery failure",
+        "screen": "Cracked OLED display",
+        "motherboard": "Motherboard failure",
+        "charging_port": "Charging port failure",
+    }
+    estimates = {
+        fault_type: estimate_assessment_values(
+            category="Smartphone",
+            brand="Acme",
+            model="Phone 14",
+            age_years=2,
+            overall_condition="good",
+            functional_status="partially_functional",
+            specific_faults=[description],
+        )
+        for fault_type, description in fault_descriptions.items()
+    }
+
+    repair_midpoints = {kind: estimate.estimated_repair_cost for kind, estimate in estimates.items()}
+    assert len(set(repair_midpoints.values())) == 4
+    assert repair_midpoints["motherboard"] > repair_midpoints["screen"]
+    assert repair_midpoints["screen"] > repair_midpoints["battery"]
+    assert repair_midpoints["battery"] > repair_midpoints["charging_port"]
+    assert estimates["motherboard"].estimated_repair_cost > estimates["motherboard"].estimated_replacement_cost * 0.5
+
+def test_display_technology_and_exact_model_change_screen_range():
+    oled = estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["cracked OLED screen"],
+    )
+    lcd = estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["cracked LCD screen"],
+    )
+    unknown_display = estimate_assessment_values(
+        category="Laptop", brand="Acme", model="Book 14", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["cracked screen"],
+    )
+    premium_model = estimate_assessment_values(
+        category="Laptop", brand="Lenovo", model="ThinkPad X1 Pro OLED", age_years=2,
+        overall_condition="good", functional_status="partially_functional",
+        specific_faults=["cracked screen"],
+    )
+
+    assert oled.estimated_repair_cost > lcd.estimated_repair_cost
+    assert premium_model.estimated_repair_cost > oled.estimated_repair_cost
+    assert unknown_display.confidence == "low"
+    assert any("Display type could not be inferred" in note for note in unknown_display.notes)
+
+def test_all_six_route_scores_respond_to_device_fault_profile():
+    functional_device = DeviceAssessmentInput(
+        category="Laptop", brand="Acme", model="Book 14", age_years=1,
+        working_condition="working", functional_status="fully_functional",
+        overall_condition="good", powers_on=True,
+    )
+    faulted_device = DeviceAssessmentInput(
+        category="Laptop", brand="Acme", model="Book 14", age_years=4,
+        working_condition="not_working", functional_status="non_functional",
+        overall_condition="poor", powers_on=False, physically_damaged=True,
+        specific_faults=["motherboard failure", "cracked screen"],
+    )
+    eligible = {
+        route: RouteEligibilityResult(route=route, is_eligible=True, reason="test profile")
+        for route in ROUTES
+    }
+
+    functional_scores = score_eligible_routes(functional_device, eligible)
+    faulted_scores = score_eligible_routes(faulted_device, eligible)
+
+    assert set(functional_scores) == {"Repair", "Reuse", "Resell", "Donate", "Refurbish", "Recycle"}
+    for route in ROUTES:
+        assert functional_scores[route].final_score != faulted_scores[route].final_score
+        assert 0 <= faulted_scores[route].final_score <= 100

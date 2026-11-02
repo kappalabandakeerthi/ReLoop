@@ -1,16 +1,17 @@
 """
 ReLoop Database Seed Script
 Populates standard device categories, clearly labeled sample service providers,
-and default test accounts (Administrator & Demo User).
+and an optional environment-provisioned administrator account.
 """
 
 import json
 from sqlalchemy.orm import Session
 from ..database import engine, SessionLocal, Base
 from ..models.user import User
-from ..models.device import DeviceCategory, Device
+from ..models.device import DeviceCategory
 from ..models.provider import ServiceProvider
 from ..utils.security import get_password_hash
+from ..config import settings
 
 def seed_database():
     Base.metadata.create_all(bind=engine)
@@ -39,35 +40,16 @@ def seed_database():
                 db.add(cat)
         db.commit()
 
-        # 2. Seed Default Admin and User
-        admin_email = "admin@reloop.dev"
-        user_email = "user@reloop.dev"
-
-        if not db.query(User).filter(User.email == admin_email).first():
-            admin_user = User(
-                email=admin_email,
-                hashed_password=get_password_hash("Admin@123456"),
-                full_name="ReLoop Administrator",
-                phone="+1 (555) 019-2831",
-                address="701 Brazos St Suite 400",
-                city="Austin",
-                postal_code="78701",
-                role="admin"
-            )
-            db.add(admin_user)
-
-        if not db.query(User).filter(User.email == user_email).first():
-            demo_user = User(
-                email=user_email,
-                hashed_password=get_password_hash("User@123456"),
-                full_name="Alex Morgan",
-                phone="+1 (555) 014-9922",
-                address="1204 S Congress Ave",
-                city="Austin",
-                postal_code="78704",
-                role="user"
-            )
-            db.add(demo_user)
+        # Admin access is provisioned only when both credentials are configured.
+        if settings.BOOTSTRAP_ADMIN_EMAIL and settings.BOOTSTRAP_ADMIN_PASSWORD:
+            admin_email = settings.BOOTSTRAP_ADMIN_EMAIL.lower().strip()
+            if not db.query(User).filter(User.email == admin_email).first():
+                db.add(User(
+                    email=admin_email,
+                    hashed_password=get_password_hash(settings.BOOTSTRAP_ADMIN_PASSWORD),
+                    full_name="ReLoop Administrator",
+                    role="admin"
+                ))
         db.commit()
 
         # 3. Seed Clearly Labeled Sample Service Providers
