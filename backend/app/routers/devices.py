@@ -1,7 +1,16 @@
 from typing import List
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    UploadFile,
+    File
+)
 from sqlalchemy.orm import Session
+
 from ..database import get_db
 from ..models.user import User
 from ..models.device import Device, DeviceCategory
@@ -12,6 +21,7 @@ from ..schemas.device import (
     CategoryResponse
 )
 from ..utils.dependencies import get_current_user
+from ..ml.classifier import predict_device_image
 
 router = APIRouter(tags=["Devices"])
 
@@ -19,6 +29,59 @@ router = APIRouter(tags=["Devices"])
 def get_categories(db: Session = Depends(get_db)):
     categories = db.query(DeviceCategory).order_by(DeviceCategory.id).all()
     return categories
+@router.post("/devices/classify-image", tags=["ML Image Classification"])
+async def classify_device_image(
+    image: UploadFile = File(...)
+):
+    """
+    Classify an uploaded electronic-device image
+    using the trained ReLoop CNN model.
+    """
+
+    # Basic file-size validation (10 MB)
+    image_bytes = await image.read(10 * 1024 * 1024 + 1)
+
+    if not image_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please upload an image."
+        )
+
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Image size must not exceed 10 MB."
+        )
+
+    try:
+        result = predict_device_image(image_bytes)
+
+        return {
+            "success": True,
+            "filename": image.filename,
+            "predicted_category": result["predicted_category"],
+            "confidence": result["confidence"],
+            "top_predictions": result["top_predictions"]
+        }
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Trained classification model not found."
+        )
+
+    except Exception as e:
+        print(f"[Image Classification Error] {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Image classification failed."
+        )
 
 @router.get("/devices", response_model=List[DeviceResponse])
 def get_my_devices(

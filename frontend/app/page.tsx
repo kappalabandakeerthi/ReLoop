@@ -35,6 +35,17 @@ type Notice = { tone: "success" | "error"; text: string };
 type UserProfile = { id: string; email: string; full_name: string; role: string; city?: string | null };
 type TokenResponse = { access_token: string; user_id: string; email: string; full_name: string; role: string };
 type Category = { id: number; name: string; description?: string | null; icon?: string | null };
+type ClassificationResult = {
+  success: boolean;
+  filename: string;
+  predicted_category: string;
+  confidence: number;
+  suggested_app_category: string;
+  top_predictions: {
+    category: string;
+    confidence: number;
+  }[];
+};
 type Device = {
   id: string; category_id: number; category_name?: string | null; name: string; brand: string;
   model: string; purchase_year?: number | null; approximate_age_years?: number | null;
@@ -171,6 +182,9 @@ export default function Home() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [classifying, setClassifying] = useState(false);
+const [classification, setClassification] = useState<ClassificationResult | null>(null);
+const [classificationError, setClassificationError] = useState("");
 
   function setView(nextView: View) {
     updateView(nextView);
@@ -365,6 +379,109 @@ export default function Home() {
       showError(error);
     } finally {
       setSaving(false);
+    }
+  }
+    async function classifyDeviceImage(file: File) {
+  if (!file) return;
+
+  setClassification(null);
+  setClassificationError("");
+
+  if (!file.type.startsWith("image/")) {
+    setClassificationError("Please select a valid image.");
+    return;
+  }
+
+  if (file.size > 10 * 1024 * 1024) {
+    setClassificationError("Image size must be less than 10 MB.");
+    return;
+  }
+
+  setClassifying(true);
+
+  const categoryMap: Record<string, string> = {
+    "Buffalo HD": "Other",
+    "InkReader Energy2074": "Tablet",
+    "iPad A1430": "Tablet",
+    "MacBookProA1278": "Laptop",
+    "MP3Player SPC": "Other",
+    "Router Sagem": "Other",
+    "Samsung GalaxyA9": "Smartphone",
+    "Toshib PortegeM300": "Laptop",
+    "Toyota EMU": "Other",
+    "Toyota stereoNav EA08": "Other",
+    "TV controller Sanyo": "Other",
+    "Vaio PCG7164M": "Laptop",
+  };
+
+  try {
+    const formData = new FormData();
+    formData.append("image", file);
+
+    const result = await apiRequest<{
+      success: boolean;
+      filename: string;
+      predicted_category: string;
+      confidence: number;
+      top_predictions: {
+        category: string;
+        confidence: number;
+      }[];
+    }>("/devices/classify-image", undefined, {
+      method: "POST",
+      body: formData,
+    });
+
+    setClassification({
+      ...result,
+      suggested_app_category:
+        categoryMap[result.predicted_category] ?? "Other",
+    });
+
+  } catch (error) {
+    setClassificationError(errorText(error));
+  } finally {
+    setClassifying(false);
+  }
+
+
+    try {
+      const formData = new FormData();
+      formData.append("image", file);
+
+      const result = await apiRequest<ClassificationResult>(
+        "/devices/classify-image",
+        undefined,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const categoryMap: Record<string, string> = {
+        "Buffalo HD": "Other",
+        "InkReader Energy2074": "Tablet",
+        "iPad A1430": "Tablet",
+        "MacBookProA1278": "Laptop",
+        "MP3Player SPC": "Other",
+        "Router Sagem": "Other",
+        "Samsung GalaxyA9": "Smartphone",
+        "Toshib PortegeM300": "Laptop",
+        "Toyota EMU": "Other",
+        "Toyota stereoNav EA08": "Other",
+        "TV controller Sanyo": "Other",
+        "Vaio PCG7164M": "Laptop",
+      };
+
+      setClassification({
+        ...result,
+        suggested_app_category:
+          categoryMap[result.predicted_category] ?? "Other",
+      });
+    } catch (error) {
+      setClassificationError(errorText(error));
+    } finally {
+      setClassifying(false);
     }
   }
 
@@ -635,6 +752,66 @@ export default function Home() {
 
           {view === "devices" && <>
             <PageTitle eyebrow="DEVICE INVENTORY" title="Your devices" copy="Keep the basics together. Assessments and recovery records stay linked to each device." />
+            <section className="panel form-panel" style={{ marginBottom: "20px" }}>
+  <PanelTitle title="Identify your device with AI" />
+
+  <p className="panel-subtitle">
+    Upload an electronic-device image to get an AI-powered category prediction.
+  </p>
+
+  <input
+    type="file"
+    accept="image/*"
+    disabled={classifying}
+    onChange={(event) => {
+      const file = event.target.files?.[0];
+      if (file) classifyDeviceImage(file);
+      event.target.value = "";
+    }}
+  />
+
+  {classifying && (
+    <p className="panel-subtitle">Analyzing image... Please wait.</p>
+  )}
+
+  {classificationError && (
+    <p style={{ color: "#dc2626", marginTop: "12px" }}>
+      {classificationError}
+    </p>
+  )}
+
+  {classification && (
+    <div style={{ marginTop: "16px" }}>
+      <h3>
+        Predicted device: {classification.predicted_category}
+      </h3>
+
+      <p>
+        Confidence: {classification.confidence}%
+      </p>
+
+      <p>
+  Suggested ReLoop category:{" "}
+  <strong>{classification.suggested_app_category}</strong>
+</p>
+
+      <h4 style={{ marginTop: "12px" }}>Top 3 predictions</h4>
+
+      <ul>
+        {classification.top_predictions.map((prediction) => (
+          <li key={prediction.category}>
+            {prediction.category} — {prediction.confidence}%
+          </li>
+        ))}
+      </ul>
+
+      <p className="panel-subtitle">
+        This is an AI suggestion. Verify the category before registering
+        your device.
+      </p>
+    </div>
+  )}
+</section>
             <div className="two-column-form">
               <section className="panel form-panel"><PanelTitle title="Register a device" /><form className="form-grid" onSubmit={createDevice}>
                 <label className="span-two">Device name<input name="name" placeholder="e.g. Work laptop" minLength={2} required /></label>

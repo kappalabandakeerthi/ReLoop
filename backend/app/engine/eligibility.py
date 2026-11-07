@@ -272,14 +272,21 @@ def evaluate_recovery_eligibility(device: DeviceAssessmentInput) -> StageAOutput
             reason="Device possesses restorable commercial value through parts overhaul, battery replacement, or certified testing."
         )
 
-    # -------------------------------------------------------------
+        # -------------------------------------------------------------
     # 6. RECYCLE ELIGIBILITY (Authorized E-Waste Recyclers)
     # -------------------------------------------------------------
-    # Authorized e-waste recycling is ALWAYS feasible for all electronics
+
+    # Recycling is a potential recovery route for electronic devices.
+    # Actual acceptance depends on the recycler's policies and capabilities.
     results["Recycle"] = RouteEligibilityResult(
         route="Recycle",
         is_eligible=True,
-        reason="Certified R2/e-Stewards recyclers accept all electronic devices for safe component recovery and hazardous materials handling."
+        reason=(
+            "Electronic devices may be suitable for material recovery "
+            "through authorized e-waste recyclers. Actual acceptance depends "
+            "on the recycler's policies, device category, and condition. "
+            "Verify acceptance with an authorized recycler."
+        )
     )
 
     eligible = [r for r, res in results.items() if res.is_eligible]

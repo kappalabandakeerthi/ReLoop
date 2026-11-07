@@ -4,6 +4,7 @@ from sqlalchemy import Column, String, Integer, Float, Boolean, Text, DateTime, 
 from sqlalchemy.orm import relationship
 from ..database import Base
 
+
 class DeviceCategory(Base):
     __tablename__ = "device_categories"
 
@@ -41,3 +42,17 @@ class Device(Base):
     assessments = relationship("Assessment", back_populates="device", cascade="all, delete-orphan")
     recommendations = relationship("Recommendation", back_populates="device", cascade="all, delete-orphan")
     recovery_requests = relationship("RecoveryRequest", back_populates="device", cascade="all, delete-orphan")
+    {
+  "predicted_category": "MacBookProA1278",
+  "confidence": 94.25,
+  "top_predictions": [
+    {
+      "category": "MacBookProA1278",
+      "confidence": 94.25
+    },
+    {
+      "category": "Vaio PCG7164M",
+      "confidence": 3.12
+    }
+  ]
+}

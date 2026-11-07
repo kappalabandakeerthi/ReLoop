@@ -16,9 +16,13 @@ export async function apiRequest<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const headers = new Headers(options.headers);
-  if (options.body && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
+  if (
+  options.body &&
+  !(typeof FormData !== "undefined" && options.body instanceof FormData) &&
+  !headers.has("Content-Type")
+) {
+  headers.set("Content-Type", "application/json");
+}
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
